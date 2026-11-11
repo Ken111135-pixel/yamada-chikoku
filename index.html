@@ -321,7 +321,7 @@ body{background:var(--bg);color:var(--chalk);font:500 15px/1.6 var(--f-body);mar
       <p class="sub" id="rankSub"></p>
       <ol id="rankList"></ol>
       <p class="empty" id="rankEmpty">まだ記録がありません。着席できれば載ります。</p>
-      <p class="note">第一ステージで失敗(失格)すると記録されません。第二ステージ(逃走)で追いつかれた地点までの記録が残ります。総合点は、残り時間×100、イベント加点、走った距離×30の合計です。記録はこの端末に保存されます。</p>
+      <p class="note">第一ステージで失敗(失格)すると記録されません。第二ステージ(逃走)で追いつかれた地点までの記録が、みんなのランキングに残ります。総合点は、残り時間×100、イベント加点、走った距離×30の合計です。記録はこの端末に保存されます。</p>
     </div>
   </section>
 
@@ -602,23 +602,56 @@ nameIn.addEventListener('input',()=>{try{localStorage.setItem('yamada.name',name
 const RK='yamada.rank.v2';let memRank=[];
 function rkLoad(){try{const v=JSON.parse(localStorage.getItem(RK)||'null');if(Array.isArray(v))return v}catch(e){}return memRank}
 function rkSave(a){memRank=a;try{localStorage.setItem(RK,JSON.stringify(a))}catch(e){}}
+/* ---------- online ranking (Firebase Firestore) ---------- */
+const FBCFG={apiKey:"AIzaSyBHSOBJqfjG6ZFEwAuucAAHbxq4XkLoYOI",authDomain:"yamada-chikoku.firebaseapp.com",projectId:"yamada-chikoku",storageBucket:"yamada-chikoku.firebasestorage.app",messagingSenderId:"963049190557",appId:"1:963049190557:web:293221cd9643b761aa1074"};
+const FBV='10.12.2';let fbP=null;
+function fbInit(){
+  if(!fbP)fbP=(async()=>{
+    const A=await import('https://www.gstatic.com/firebasejs/'+FBV+'/firebase-app.js');
+    const F=await import('https://www.gstatic.com/firebasejs/'+FBV+'/firebase-firestore.js');
+    return {F,db:F.getFirestore(A.initializeApp(FBCFG))};
+  })().catch(e=>{fbP=null;return null});
+  return fbP;
+}
+const CL={all:null,daily:null,day:'',busy:false};
+async function fbSubmit(e){
+  const f=await fbInit();if(!f)return null;
+  try{
+    const {F,db}=f,col=F.collection(db,'scores');
+    await F.addDoc(col,{n:e.n,s:Math.floor(e.s),t:Math.round(e.t*10)/10,m:Math.floor(e.m||0),d:e.d,ts:F.serverTimestamp()});
+    CL.all=null;CL.daily=null;
+    const c=await F.getCountFromServer(F.query(col,F.where('s','>',Math.floor(e.s))));
+    const dl=await F.getDocs(F.query(col,F.where('d','==',e.d),F.limit(300)));
+    let dr=1;dl.forEach(x=>{if(x.data().s>e.s)dr++});
+    return {all:c.data().count+1,daily:dr};
+  }catch(err){return null}
+}
+async function fbFetch(){
+  const f=await fbInit();if(!f)return false;
+  try{
+    const {F,db}=f,col=F.collection(db,'scores'),d=todayJST();
+    const [a,b]=await Promise.all([F.getDocs(F.query(col,F.orderBy('s','desc'),F.limit(20))),F.getDocs(F.query(col,F.where('d','==',d),F.limit(300)))]);
+    const mk=q=>{const r=[];q.forEach(x=>{const v=x.data();r.push({n:v.n,s:v.s,t:v.t,m:v.m,d:v.d})});return r};
+    CL.all=mk(a);CL.daily=mk(b).sort((x,y)=>y.s-x.s).slice(0,20);CL.day=d;return true;
+  }catch(err){return false}
+}
 function rkAdd(score,time,mm){
   const d=todayJST(),e={n:(nameIn.value||'ななし').slice(0,8),s:score,t:time,m:mm,d:d,id:Date.now()+Math.random()};
   const all=rkLoad().concat([e]).sort((x,y)=>y.s-x.s).slice(0,100);rkSave(all);
-  G.mineId=e.id;
+  G.mineId=e.id;G.mineKey=e.n+'|'+Math.floor(e.s)+'|'+e.d;
   const aIdx=all.indexOf(e),dIdx=all.filter(x=>x.d===d).indexOf(e);
-  return {all:aIdx<0?0:aIdx+1,daily:dIdx<0?0:dIdx+1};
+  return {all:aIdx<0?0:aIdx+1,daily:dIdx<0?0:dIdx+1,e:e};
 }
 function renderRank(){
-  const d=todayJST(),a=rkLoad(),list=(G.tab==='daily'?a.filter(x=>x.d===d):a).slice(0,10),ol=$('rankList');ol.textContent='';
+  const d=todayJST(),a=rkLoad(),cloud=CL.all&&CL.day===d,src=cloud?(G.tab==='daily'?CL.daily:CL.all):(G.tab==='daily'?a.filter(x=>x.d===d):a),list=src.slice(0,cloud?20:10),ol=$('rankList');ol.textContent='';
   $('tabAll').setAttribute('aria-pressed',G.tab==='all');$('tabDaily').setAttribute('aria-pressed',G.tab==='daily');
-  $('rankSub').textContent=G.tab==='daily'?d+' の記録(日付が変わるとリセット)':'これまでのベスト10';
+  $('rankSub').textContent=(cloud?'みんなの記録・':CL.busy?'読み込み中…(この端末の記録を表示)・':'オフライン(この端末の記録)・')+(G.tab==='daily'?d+' の記録(日付が変わるとリセット)':'上位'+(cloud?20:10)+'件');
   $('rankEmpty').hidden=list.length>0;
-  list.forEach((e,i)=>{const li=document.createElement('li');if(e.id===G.mineId)li.className='me';
+  list.forEach((e,i)=>{const li=document.createElement('li');if(e.id===G.mineId||(cloud&&G.mineKey===e.n+'|'+e.s+'|'+e.d))li.className='me';
     [(i+1)+'位',e.n,e.s.toLocaleString('ja-JP')+'点',(e.m!=null?e.m+'m':e.t.toFixed(1)+'s')].forEach(t=>{const s=document.createElement('span');s.textContent=t;li.appendChild(s)});
     ol.appendChild(li)});
 }
-function showScreen(name){$('screenGame').hidden=name!=='game';$('screenRank').hidden=name!=='rank';if(name==='game')fit();else renderRank()}
+function showScreen(name){$('screenGame').hidden=name!=='game';$('screenRank').hidden=name!=='rank';if(name==='game')fit();else{renderRank();CL.busy=true;fbFetch().then(()=>{CL.busy=false;if(!$('screenRank').hidden)renderRank()})}}
 $('tabAll').onclick=()=>{G.tab='all';renderRank()};
 $('tabDaily').onclick=()=>{G.tab='daily';renderRank()};
 $('rankBtn').onclick=()=>showScreen('rank');
@@ -1008,10 +1041,11 @@ function caught(reason){
   G.mode='over';G.ev=null;sfx.bad();hideLayers();
   const m=Math.floor(G.m),dist=m*30,total=G.bonus+G.s1+dist;
   const rk=rkAdd(total,G.t1,m);
+  fbSubmit(rk.e).then(r=>{if(r&&!$('result').hidden)$('resReason').textContent=reason+'(全国 '+r.all+'位 / 今日 '+r.daily+'位)'});
   const st=$('stage');st.classList.remove('shake');void st.offsetWidth;st.classList.add('shake','flash');
   clearTimeout(resTimer);
   resTimer=setTimeout(()=>{st.classList.remove('flash');
-    showResult(false,'つかまった…',reason+'(総合 '+rk.all+'位 / 今日 '+rk.daily+'位)',
+    showResult(false,'つかまった…',reason+'(この端末 '+rk.all+'位 / 今日 '+rk.daily+'位)',
       [['走行距離',m+'m('+dist.toLocaleString('ja-JP')+'点)'],['ステージ1 残り時間点',G.s1.toLocaleString('ja-JP')+'点'],['イベント加点(累計)',G.bonus.toLocaleString('ja-JP')+'点('+G.okCount+'回成功)'],['うちスピード分',G.speedBonus.toLocaleString('ja-JP')+'点'],['最高レア度',G.rares?TIER_NAMES[G.bestTier]+'('+G.rares+'回)':'なし'],['総合点',total.toLocaleString('ja-JP')+'点',1]])},500);
 }
 function runTap(){
